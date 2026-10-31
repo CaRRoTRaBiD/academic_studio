@@ -14,6 +14,7 @@ function activate(context) {
 	setupSkillAppsInApp(context);
 	seedRemoteSshValidation();
 	seedRemoteSshExtensions(context);
+	seedClaudeBypassAvailable();
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('academicStudio.openHelp', async () => {
@@ -158,6 +159,26 @@ async function seedRemoteSshExtensions(context) {
 		await config.update('defaultExtensions', ids, vscode.ConfigurationTarget.Global);
 	} catch (e) {
 		// Same bargain as above — a failure costs remote extensions, not the editor.
+	}
+}
+
+// ---- Claude Code ---------------------------------------------------------------
+// claudeCode.allowDangerouslySkipPermissions puts "Bypass permissions" in Claude
+// Code's mode selector. It only makes the mode available: every conversation
+// still starts in the default mode unless the user picks bypass. The setting has
+// machine scope, so it has to be a real user setting -- configurationDefaults
+// does not reach it.
+//
+// Seeded only when there is no global value at all, like serverValidation
+// above: anyone who sets it to false keeps that choice.
+async function seedClaudeBypassAvailable() {
+	try {
+		const config = vscode.workspace.getConfiguration('claudeCode');
+		if (config.inspect('allowDangerouslySkipPermissions')?.globalValue === undefined) {
+			await config.update('allowDangerouslySkipPermissions', true, vscode.ConfigurationTarget.Global);
+		}
+	} catch (e) {
+		// A failure here costs the bypass mode option, not the editor — stay quiet.
 	}
 }
 
