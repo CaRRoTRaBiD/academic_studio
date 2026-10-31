@@ -29,7 +29,9 @@ env:
 jobs:
   # ---------------------------------------------------------------- macOS (arm64)
   build-macos:
-    runs-on: macos-14   # Apple Silicon
+    # macos-15 (Apple Silicon): GitHub retired the macos-14 image on 2026-11-02,
+    # and its brownouts before that cancelled jobs at startup.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
