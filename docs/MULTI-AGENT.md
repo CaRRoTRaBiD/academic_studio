@@ -21,8 +21,11 @@ place: `academicStudioAgents` in `overlay/product.overrides.json`, which
 
 The active agent is the user setting `academicStudio.agent` (registered by
 `agents.ts`; its allowed values are the registry's keys). When it is unset or
-names an unknown agent, `academicStudioDefaultAgent` applies. The extensions
-read the setting at activation, so a change takes effect after a window reload.
+names an unknown agent, `academicStudioDefaultAgent` applies. It is an
+application-wide setting (no per-folder override), and the extensions read it
+at activation, so a change takes effect after a window reload. An entry missing
+any of `displayName`, `extensionId`, `commands.open`, `homeDir`, `projectDir`,
+`instructionsFile` or `skillsDir` is ignored by all three consumers.
 
 Keys starting with `_` in the registry are comments. Both extensions carry a
 small `FALLBACK_AGENT` equal to the claude entry, used only if `product.json`

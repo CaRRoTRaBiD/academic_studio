@@ -458,7 +458,12 @@ function resolveAgent(context) {
 	if (!registry || typeof registry !== 'object') { return FALLBACK_AGENT; }
 	let chosen;
 	try { chosen = vscode.workspace.getConfiguration('academicStudio').get('agent'); } catch (e) { /* none */ }
-	const usable = id => typeof id === 'string' && !id.startsWith('_') && registry[id] && typeof registry[id] === 'object';
+	// Same completeness test as core (agents.ts isComplete), so an incomplete
+	// entry is skipped everywhere instead of core and this extension disagreeing.
+	const text = v => typeof v === 'string' && v.length > 0;
+	const complete = e => text(e.displayName) && text(e.extensionId) && !!e.commands && text(e.commands.open)
+		&& text(e.homeDir) && text(e.projectDir) && text(e.instructionsFile) && text(e.skillsDir);
+	const usable = id => typeof id === 'string' && !id.startsWith('_') && registry[id] && typeof registry[id] === 'object' && complete(registry[id]);
 	const id = usable(chosen) ? chosen : usable(fallbackId) ? fallbackId : Object.keys(registry).find(usable);
 	if (!id) { return FALLBACK_AGENT; }
 	return Object.assign({ id, features: {} }, registry[id], { id });

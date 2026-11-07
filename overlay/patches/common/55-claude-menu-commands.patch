@@ -2,7 +2,7 @@ diff --git a/src/vs/workbench/contrib/academicStudio/browser/agents.ts b/src/vs/
 new file mode 100644
 --- /dev/null
 +++ b/src/vs/workbench/contrib/academicStudio/browser/agents.ts
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,141 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -24,7 +24,7 @@ new file mode 100644
 +
 +import { localize } from '../../../../nls.js';
 +import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
-+import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
++import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 +import product from '../../../../platform/product/common/product.js';
 +import { Registry } from '../../../../platform/registry/common/platform.js';
 +
@@ -86,11 +86,22 @@ new file mode 100644
 +	return raw && typeof raw === 'object' ? raw : {};
 +}
 +
-+/** Every agent in the registry; keys starting with '_' are comments. */
++/**
++ * True when an entry has every field the menu needs. The built-in extensions
++ * apply the same test, so core and extensions never pick different agents for
++ * an incomplete entry: it is skipped everywhere.
++ */
++function isComplete(value: Partial<IAgentDefinition>): boolean {
++	const text = (field: unknown) => typeof field === 'string' && field.length > 0;
++	return text(value.displayName) && text(value.extensionId) && text(value.commands?.open)
++		&& text(value.homeDir) && text(value.projectDir) && text(value.instructionsFile) && text(value.skillsDir);
++}
++
++/** Every complete agent in the registry; keys starting with '_' are comments. */
 +export function allAgents(): IAgentDefinition[] {
 +	const agents: IAgentDefinition[] = [];
 +	for (const [id, value] of Object.entries(rawRegistry())) {
-+		if (id.startsWith('_') || !value || typeof value !== 'object') {
++		if (id.startsWith('_') || !value || typeof value !== 'object' || !isComplete(value)) {
 +			continue;
 +		}
 +		agents.push({ ...value, id, urls: value.urls ?? {}, features: value.features ?? {} });
@@ -122,6 +133,9 @@ new file mode 100644
 +		properties: {
 +			[AGENT_SETTING]: {
 +				type: 'string',
++				// One choice per installation: the extensions read it once per window,
++				// and a per-folder override would make the menu and Run Setup disagree.
++				scope: ConfigurationScope.APPLICATION,
 +				enum: knownAgents.map(agent => agent.id),
 +				enumItemLabels: knownAgents.map(agent => agent.displayName),
 +				default: knownAgents.some(agent => agent.id === defaultAgentId()) ? defaultAgentId() : knownAgents[0].id,
@@ -134,7 +148,7 @@ diff --git a/src/vs/workbench/contrib/academicStudio/browser/claudeMenu.contribu
 new file mode 100644
 --- /dev/null
 +++ b/src/vs/workbench/contrib/academicStudio/browser/claudeMenu.contribution.ts
-@@ -0,0 +1,1277 @@
+@@ -0,0 +1,1285 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -1215,7 +1229,11 @@ new file mode 100644
 +		if (!services) {
 +			return;
 +		}
-+		if (!hasFeature(services, 'connectors', localize('academicStudioFeatureConnectors', "Managing connectors from this menu")) || !services.agent.userConfigFile) {
++		if (!hasFeature(services, 'connectors', localize('academicStudioFeatureConnectors', "Managing connectors from this menu"))) {
++			return;
++		}
++		if (!services.agent.userConfigFile) {
++			services.notificationService.info(localize('academicStudioAgentNoConfigFile', "{0} has no connector configuration file set up in this build.", services.agent.displayName));
 +			return;
 +		}
 +		const userConfig = joinPath(await services.pathService.userHome(), services.agent.userConfigFile);
@@ -1390,6 +1408,10 @@ new file mode 100644
 +				detail: localize('academicStudioClaudePluginsCommunityDetail', "github.com/anthropics/claude-plugins-community — plugins contributed by the community"),
 +				url: urls.communityPlugins
 +			});
++		}
++		if (!choices.length) {
++			services.notificationService.info(localize('academicStudioAgentNoPluginUrls', "There is no plugin directory to open for {0}.", services.agent.displayName));
++			return;
 +		}
 +		const picked = await services.quickInputService.pick<IPluginItem>(choices, {
 +			title: localize('academicStudioClaudePluginsTitle', "Claude Plugins"),
