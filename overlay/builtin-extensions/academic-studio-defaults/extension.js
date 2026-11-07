@@ -11,10 +11,11 @@ const path = require('path');
 const fs = require('fs');
 
 function activate(context) {
+	const agent = resolveAgent(context);
 	setupSkillAppsInApp(context);
 	seedRemoteSshValidation();
 	seedRemoteSshExtensions(context);
-	seedClaudeBypassAvailable();
+	seedClaudeBypassAvailable(agent);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('academicStudio.openHelp', async () => {
@@ -82,7 +83,39 @@ function activate(context) {
 		})
 	);
 
-	openClaudeOnStartup(context);
+	openClaudeOnStartup(context, agent);
+}
+
+// ---- coding agent ---------------------------------------------------------------
+// The chat that opens on startup, and how its tab is recognized, come from the
+// academicStudioAgents registry in product.json (overlay/product.overrides.json),
+// shared with core (patch 55) and academic-studio-setup. The active agent is the
+// academicStudio.agent setting (falling back to academicStudioDefaultAgent).
+// FALLBACK_AGENT mirrors the registry's claude entry and is used only when
+// product.json cannot be read -- it is exactly what this file hard-coded before.
+const FALLBACK_AGENT = {
+	id: 'claude', displayName: 'Claude', settingsSection: 'claudeCode',
+	commands: { open: 'claude-vscode.primaryEditor.open' }, tabPattern: 'claude',
+	features: { permissions: 'claude-code' },
+};
+
+function resolveAgent(context) {
+	const product = readProductJson(context);
+	const registry = product && product.academicStudioAgents;
+	if (!registry || typeof registry !== 'object') { return FALLBACK_AGENT; }
+	let chosen;
+	try { chosen = vscode.workspace.getConfiguration('academicStudio').get('agent'); } catch (e) { /* none */ }
+	// Same completeness test as core (agents.ts isComplete), so an incomplete
+	// entry is skipped everywhere instead of core and this extension disagreeing.
+	const text = v => typeof v === 'string' && v.length > 0;
+	const complete = e => text(e.displayName) && text(e.extensionId) && !!e.commands && text(e.commands.open)
+		&& text(e.homeDir) && text(e.projectDir) && text(e.instructionsFile) && text(e.skillsDir);
+	const usable = id => typeof id === 'string' && !id.startsWith('_') && registry[id] && typeof registry[id] === 'object' && complete(registry[id]);
+	const fallbackId = product.academicStudioDefaultAgent || 'claude';
+	const id = usable(chosen) ? chosen : usable(fallbackId) ? fallbackId : Object.keys(registry).find(usable);
+	if (!id) { return FALLBACK_AGENT; }
+	const agent = Object.assign({ features: {} }, registry[id], { id });
+	return agent;
 }
 
 // True if a Claude Code tab is recognizably open. Best-effort only: newer
@@ -171,9 +204,11 @@ async function seedRemoteSshExtensions(context) {
 //
 // Seeded only when there is no global value at all, like serverValidation
 // above: anyone who sets it to false keeps that choice.
-async function seedClaudeBypassAvailable() {
+async function seedClaudeBypassAvailable(agent) {
+	// Claude Code's setting: only for an agent that uses its permission modes.
+	if (!agent || agent.features.permissions !== 'claude-code') { return; }
 	try {
-		const config = vscode.workspace.getConfiguration('claudeCode');
+		const config = vscode.workspace.getConfiguration(agent.settingsSection || 'claudeCode');
 		if (config.inspect('allowDangerouslySkipPermissions')?.globalValue === undefined) {
 			await config.update('allowDangerouslySkipPermissions', true, vscode.ConfigurationTarget.Global);
 		}
@@ -182,12 +217,15 @@ async function seedClaudeBypassAvailable() {
 	}
 }
 
+// The active agent's tab pattern ('claude' for Claude), set by openClaudeOnStartup.
+let agentTabRe = /claude/i;
+
 function claudeTabIsOpen() {
 	try {
 		for (const group of vscode.window.tabGroups.all) {
 			for (const tab of group.tabs) {
 				const viewType = tab.input && tab.input.viewType;
-				if ((viewType && /claude/i.test(viewType)) || /claude/i.test(tab.label || '')) {
+				if ((viewType && agentTabRe.test(viewType)) || agentTabRe.test(tab.label || '')) {
 					return true;
 				}
 			}
@@ -210,7 +248,9 @@ function restoredTabsExist() {
 	return false;
 }
 
-function openClaudeOnStartup(context) {
+function openClaudeOnStartup(context, agent) {
+	agent = agent || FALLBACK_AGENT;
+	try { agentTabRe = new RegExp(agent.tabPattern || agent.id, 'i'); } catch (e) { agentTabRe = /claude/i; }
 	// Auto-open Claude only in a FRESH window (no restored editor tabs beyond
 	// the Welcome page). We used to open whenever no Claude tab was detected,
 	// but Claude Code now titles its tab with the conversation name, so a
@@ -241,7 +281,7 @@ function openClaudeOnStartup(context) {
 		let tries = 0;
 		const tick = () => {
 			if (claudeTabIsOpen() || restoredTabsExist()) { return; }
-			vscode.commands.executeCommand('claude-vscode.primaryEditor.open').then(
+			vscode.commands.executeCommand(agent.commands.open).then(
 				() => { /* opened */ },
 				() => { if (++tries < 6) { setTimeout(tick, 700); } }
 			);

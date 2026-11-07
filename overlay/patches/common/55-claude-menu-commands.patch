@@ -1,8 +1,154 @@
+diff --git a/src/vs/workbench/contrib/academicStudio/browser/agents.ts b/src/vs/workbench/contrib/academicStudio/browser/agents.ts
+new file mode 100644
+--- /dev/null
++++ b/src/vs/workbench/contrib/academicStudio/browser/agents.ts
+@@ -0,0 +1,141 @@
++/*---------------------------------------------------------------------------------------------
++ *  Copyright (c) Microsoft Corporation. All rights reserved.
++ *  Licensed under the MIT License. See License.txt in the project root for license information.
++ *--------------------------------------------------------------------------------------------*/
++
++// Academic Studio: the coding agents the app can drive.
++//
++// Every agent-specific id, folder and file name comes from the
++// academicStudioAgents registry in product.json (overlay/product.overrides.json),
++// which the built-in extensions read too, so there is one source of truth. The
++// active agent is the academicStudio.agent setting, registered here; when it is
++// unset or names an agent this build does not know, academicStudioDefaultAgent
++// applies.
++//
++// `features` maps each menu capability to the implementation that serves it for
++// this agent (for Claude: 'claude-jsonl' conversations, 'claude-settings'
++// toggles, ...). A capability an agent lacks is simply absent, and the menu item
++// says so rather than reading another agent's files.
++
++import { localize } from '../../../../nls.js';
++import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
++import { ConfigurationScope, Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
++import product from '../../../../platform/product/common/product.js';
++import { Registry } from '../../../../platform/registry/common/platform.js';
++
++export const AGENT_SETTING = 'academicStudio.agent';
++
++export interface IAgentFeatures {
++	readonly conversations?: 'claude-jsonl';
++	readonly permissions?: 'claude-code';
++	readonly toggles?: 'claude-settings';
++	readonly connectors?: 'claude-json';
++	readonly plugins?: 'claude-marketplace';
++}
++
++export interface IAgentDefinition {
++	/** registry key, e.g. 'claude' */
++	readonly id: string;
++	/** shown in menus and messages, e.g. 'Claude' */
++	readonly displayName: string;
++	/** the VS Code extension that provides the chat */
++	readonly extensionId: string;
++	/** the extension's settings section, e.g. 'claudeCode' */
++	readonly settingsSection?: string;
++	readonly commands: {
++		/** opens the chat; may take a conversation id to resume */
++		readonly open: string;
++		readonly newChat?: string;
++	};
++	/** case-insensitive pattern that recognizes the chat's editor tab */
++	readonly tabPattern?: string;
++	/** user-level config folder, relative to the home directory, e.g. '.claude' */
++	readonly homeDir: string;
++	/** per-project config folder, relative to the workspace folder, e.g. '.claude' */
++	readonly projectDir: string;
++	/** instructions file name read from the project root and from homeDir, e.g. 'CLAUDE.md' */
++	readonly instructionsFile: string;
++	/**
++	 * How instructionsFile pulls in another file, with {0} for its name (Claude:
++	 * '@{0}'). When set and instructionsFile is not AGENTS.md, the menu offers a
++	 * shared AGENTS.md and adds the import line for it.
++	 */
++	readonly importSyntax?: string;
++	/** user-level config file relative to the home directory, e.g. '.claude.json' */
++	readonly userConfigFile?: string;
++	/** skills folder name inside homeDir and projectDir */
++	readonly skillsDir: string;
++	readonly urls: {
++		readonly skills?: string;
++		readonly mcpDocs?: string;
++		readonly plugins?: string;
++		readonly communityPlugins?: string;
++	};
++	readonly features: IAgentFeatures;
++}
++
++type RawRegistry = Record<string, Omit<IAgentDefinition, 'id'> | string>;
++
++function rawRegistry(): RawRegistry {
++	const raw = (product as { academicStudioAgents?: RawRegistry }).academicStudioAgents;
++	return raw && typeof raw === 'object' ? raw : {};
++}
++
++/**
++ * True when an entry has every field the menu needs. The built-in extensions
++ * apply the same test, so core and extensions never pick different agents for
++ * an incomplete entry: it is skipped everywhere.
++ */
++function isComplete(value: Partial<IAgentDefinition>): boolean {
++	const text = (field: unknown) => typeof field === 'string' && field.length > 0;
++	return text(value.displayName) && text(value.extensionId) && text(value.commands?.open)
++		&& text(value.homeDir) && text(value.projectDir) && text(value.instructionsFile) && text(value.skillsDir);
++}
++
++/** Every complete agent in the registry; keys starting with '_' are comments. */
++export function allAgents(): IAgentDefinition[] {
++	const agents: IAgentDefinition[] = [];
++	for (const [id, value] of Object.entries(rawRegistry())) {
++		if (id.startsWith('_') || !value || typeof value !== 'object' || !isComplete(value)) {
++			continue;
++		}
++		agents.push({ ...value, id, urls: value.urls ?? {}, features: value.features ?? {} });
++	}
++	return agents;
++}
++
++function defaultAgentId(): string {
++	return (product as { academicStudioDefaultAgent?: string }).academicStudioDefaultAgent || 'claude';
++}
++
++/** The agent the menu acts on: the setting's choice, else the product default, else the first registered one. */
++export function activeAgent(configurationService: IConfigurationService): IAgentDefinition | undefined {
++	const agents = allAgents();
++	const chosen = configurationService.getValue<string>(AGENT_SETTING);
++	return agents.find(agent => agent.id === chosen)
++		?? agents.find(agent => agent.id === defaultAgentId())
++		?? agents[0];
++}
++
++// The setting is registered only when the build knows at least one agent; its
++// allowed values are exactly the registry's keys.
++const knownAgents = allAgents();
++if (knownAgents.length) {
++	Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).registerConfiguration({
++		id: 'academicStudio',
++		title: localize('academicStudioConfigurationTitle', "Academic Studio"),
++		type: 'object',
++		properties: {
++			[AGENT_SETTING]: {
++				type: 'string',
++				// One choice per installation: the extensions read it once per window,
++				// and a per-folder override would make the menu and Run Setup disagree.
++				scope: ConfigurationScope.APPLICATION,
++				enum: knownAgents.map(agent => agent.id),
++				enumItemLabels: knownAgents.map(agent => agent.displayName),
++				default: knownAgents.some(agent => agent.id === defaultAgentId()) ? defaultAgentId() : knownAgents[0].id,
++				description: localize('academicStudioAgentSetting', "The coding agent the agent menu, the startup chat tab, and Run Setup's plugin installs work with.")
++			}
++		}
++	});
++}
 diff --git a/src/vs/workbench/contrib/academicStudio/browser/claudeMenu.contribution.ts b/src/vs/workbench/contrib/academicStudio/browser/claudeMenu.contribution.ts
 new file mode 100644
 --- /dev/null
 +++ b/src/vs/workbench/contrib/academicStudio/browser/claudeMenu.contribution.ts
-@@ -0,0 +1,1171 @@
+@@ -0,0 +1,1285 @@
 +/*---------------------------------------------------------------------------------------------
 + *  Copyright (c) Microsoft Corporation. All rights reserved.
 + *  Licensed under the MIT License. See License.txt in the project root for license information.
@@ -19,6 +165,13 @@ new file mode 100644
 +// IPathService.userHome() resolves to the REMOTE home directory in a remote
 +// window, which is the one that matters: Claude Code runs on the remote host,
 +// so ~/.claude there is the config it actually reads.
++//
++// The menu acts on the ACTIVE AGENT (agents.ts): every folder, file name,
++// command id and URL below comes from its academicStudioAgents entry in
++// product.json. Code that understands one agent's own file formats -- Claude
++// Code's conversation logs, settings toggles, ~/.claude.json, plugin registry --
++// runs only when the agent declares that feature; otherwise the menu item says
++// the agent does not support it yet.
 +
 +import { VSBuffer } from '../../../../base/common/buffer.js';
 +import { joinPath } from '../../../../base/common/resources.js';
@@ -36,13 +189,11 @@ new file mode 100644
 +import { IWorkspaceFolder, IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 +import { IEditorService } from '../../../services/editor/common/editorService.js';
 +import { IPathService } from '../../../services/path/common/pathService.js';
++import { activeAgent, IAgentDefinition, IAgentFeatures } from './agents.js';
 +
++// Static: the command palette category is registered before any agent is
++// chosen. The menu title in patch 54 is likewise fixed for now.
 +const CLAUDE_CATEGORY = localize2('academicStudioClaudeCategory', "Claude");
-+
-+const SKILLS_URL = 'https://github.com/anthropics/skills';
-+const MCP_DOCS_URL = 'https://code.claude.com/docs/en/mcp';
-+const PLUGINS_URL = 'https://claude.com/plugins';
-+const COMMUNITY_PLUGINS_URL = 'https://github.com/anthropics/claude-plugins-community';
 +
 +//#region helpers
 +
@@ -55,6 +206,8 @@ new file mode 100644
 + * the lot before the first await, then pass this around.
 + */
 +interface IClaudeServices {
++	/** the agent this invocation acts on, fixed for the whole command */
++	readonly agent: IAgentDefinition;
 +	readonly commandService: ICommandService;
 +	readonly configurationService: IConfigurationService;
 +	readonly dialogService: IDialogService;
@@ -67,10 +220,17 @@ new file mode 100644
 +	readonly workspaceContextService: IWorkspaceContextService;
 +}
 +
-+function claudeServices(accessor: ServicesAccessor): IClaudeServices {
++function claudeServices(accessor: ServicesAccessor): IClaudeServices | undefined {
++	const configurationService = accessor.get(IConfigurationService);
++	const agent = activeAgent(configurationService);
++	if (!agent) {
++		accessor.get(INotificationService).error(localize('academicStudioNoAgent', "No coding agent is configured in this build of Academic Studio."));
++		return undefined;
++	}
 +	return {
++		agent,
 +		commandService: accessor.get(ICommandService),
-+		configurationService: accessor.get(IConfigurationService),
++		configurationService,
 +		dialogService: accessor.get(IDialogService),
 +		editorService: accessor.get(IEditorService),
 +		fileService: accessor.get(IFileService),
@@ -83,11 +243,28 @@ new file mode 100644
 +}
 +
 +/**
-+ * ~/.claude for the environment Claude Code actually runs in: the remote home
-+ * over Remote-SSH, the local one otherwise.
++ * The agent's home folder (~/.claude for Claude) in the environment the agent
++ * actually runs in: the remote home over Remote-SSH, the local one otherwise.
 + */
 +async function claudeHome(services: IClaudeServices): Promise<URI> {
-+	return joinPath(await services.pathService.userHome(), '.claude');
++	return joinPath(await services.pathService.userHome(), services.agent.homeDir);
++}
++
++/** '~/<homeDir>/<rest>' for display in menu details. */
++function homeLabel(services: IClaudeServices, ...rest: string[]): string {
++	return ['~', services.agent.homeDir, ...rest].join('/');
++}
++
++/**
++ * True when the active agent provides `feature`. Otherwise tells the user the
++ * menu item is not available for this agent and returns false.
++ */
++function hasFeature(services: IClaudeServices, feature: keyof IAgentFeatures, what: string): boolean {
++	if (services.agent.features[feature]) {
++		return true;
++	}
++	services.notificationService.info(localize('academicStudioAgentNoFeature', "{0} is not available for {1} yet.", what, services.agent.displayName));
++	return false;
 +}
 +
 +function firstFolder(services: IClaudeServices): IWorkspaceFolder | undefined {
@@ -143,11 +320,18 @@ new file mode 100644
 +	// commands choke on ("e.replace is not a function").
 +	override async run(accessor: ServicesAccessor): Promise<void> {
 +		const services = claudeServices(accessor);
++		if (!services) {
++			return;
++		}
 +		const commandService = services.commandService;
++		const commands = services.agent.commands;
 +		try {
-+			await commandService.executeCommand('claude-vscode.newConversation');
++			if (!commands.newChat) {
++				throw new Error('no new-chat command');
++			}
++			await commandService.executeCommand(commands.newChat);
 +		} catch (e) {
-+			await commandService.executeCommand('claude-vscode.primaryEditor.open');
++			await commandService.executeCommand(commands.open);
 +		}
 +	}
 +}
@@ -207,6 +391,12 @@ new file mode 100644
 +
 +	override async run(accessor: ServicesAccessor): Promise<void> {
 +		const services = claudeServices(accessor);
++		if (!services) {
++			return;
++		}
++		if (!hasFeature(services, 'conversations', localize('academicStudioFeatureConversations', "Reopening previous conversations"))) {
++			return;
++		}
 +		const notificationService = services.notificationService;
 +		const folder = firstFolder(services);
 +		if (!folder) {
@@ -226,7 +416,7 @@ new file mode 100644
 +		}
 +
 +		if (!sessions.length) {
-+			notificationService.info(localize('academicStudioClaudeNoConversations', "No previous Claude conversations for this project yet."));
++			notificationService.info(localize('academicStudioClaudeNoConversations', "No previous {0} conversations for this project yet.", services.agent.displayName));
 +			return;
 +		}
 +
@@ -243,8 +433,8 @@ new file mode 100644
 +		}
 +
 +		const picked = await services.quickInputService.pick(items, {
-+			title: localize('academicStudioClaudeConversationsTitle', "Claude Conversations — {0}", folder.name),
-+			placeHolder: localize('academicStudioClaudeConversationsPlaceholder', "Select a previous conversation to reopen it in Claude")
++			title: localize('academicStudioClaudeConversationsTitle', "{0} Conversations — {1}", services.agent.displayName, folder.name),
++			placeHolder: localize('academicStudioClaudeConversationsPlaceholder', "Select a previous conversation to reopen it in {0}", services.agent.displayName)
 +		});
 +		if (!picked) {
 +			return;
@@ -253,7 +443,7 @@ new file mode 100644
 +		// Same in-session resume that /resume performs: the extension's own
 +		// vscode://anthropic.claude-code/open?session=… deep link calls exactly this.
 +		try {
-+			await services.commandService.executeCommand('claude-vscode.primaryEditor.open', picked.sessionId);
++			await services.commandService.executeCommand(services.agent.commands.open, picked.sessionId);
 +		} catch (e) {
 +			notificationService.error(localize('academicStudioClaudeResumeFailed', "Could not reopen the conversation: {0}", e instanceof Error ? e.message : String(e)));
 +		}
@@ -284,8 +474,15 @@ new file mode 100644
 +
 +	override async run(accessor: ServicesAccessor): Promise<void> {
 +		const services = claudeServices(accessor);
++		if (!services) {
++			return;
++		}
++		if (!hasFeature(services, 'permissions', localize('academicStudioFeaturePermissions', "Choosing permissions from this menu"))) {
++			return;
++		}
 +		const configurationService = services.configurationService;
-+		const current = configurationService.getValue<string>('claudeCode.initialPermissionMode') || 'default';
++		const section = services.agent.settingsSection ?? 'claudeCode';
++		const current = configurationService.getValue<string>(`${section}.initialPermissionMode`) || 'default';
 +
 +		const modes: IPermissionItem[] = [
 +			{
@@ -333,13 +530,13 @@ new file mode 100644
 +			if (!confirmed) {
 +				return;
 +			}
-+			await configurationService.updateValue('claudeCode.allowDangerouslySkipPermissions', true, ConfigurationTarget.USER);
++			await configurationService.updateValue(`${section}.allowDangerouslySkipPermissions`, true, ConfigurationTarget.USER);
 +		} else {
 +			// Close the dangerous gate again when moving off "Allow everything".
-+			await configurationService.updateValue('claudeCode.allowDangerouslySkipPermissions', undefined, ConfigurationTarget.USER);
++			await configurationService.updateValue(`${section}.allowDangerouslySkipPermissions`, undefined, ConfigurationTarget.USER);
 +		}
 +
-+		await configurationService.updateValue('claudeCode.initialPermissionMode', picked.mode, ConfigurationTarget.USER);
++		await configurationService.updateValue(`${section}.initialPermissionMode`, picked.mode, ConfigurationTarget.USER);
 +		services.notificationService.info(localize('academicStudioClaudePermDone', "Claude permissions set to \"{0}\". This applies to new Claude conversations; a conversation that is already open keeps its current setting.", picked.label));
 +	}
 +}
@@ -349,8 +546,9 @@ new file mode 100644
 +//#region Skills
 +
 +// Skills are folders with a SKILL.md whose frontmatter carries a name and a
-+// description. Global skills live in ~/.claude/skills (every project); local
-+// skills live in <workspace>/.claude/skills (this folder only).
++// description. Global skills live in ~/<homeDir>/<skillsDir> (every project);
++// local skills in <workspace>/<projectDir>/<skillsDir> (this folder only). For
++// Claude both are .claude/skills.
 +interface ISkillItem extends IQuickPickItem {
 +	skillName: string;
 +	skillRoot: URI;
@@ -387,7 +585,7 @@ new file mode 100644
 +
 +function localSkillsDir(services: IClaudeServices): URI | undefined {
 +	const folder = firstFolder(services);
-+	return folder ? joinPath(folder.uri, '.claude', 'skills') : undefined;
++	return folder ? joinPath(folder.uri, services.agent.projectDir, services.agent.skillsDir) : undefined;
 +}
 +
 +interface ISkillScopeItem extends IQuickPickItem {
@@ -406,17 +604,21 @@ new file mode 100644
 +
 +	override async run(accessor: ServicesAccessor): Promise<void> {
 +		const services = claudeServices(accessor);
++		if (!services) {
++			return;
++		}
 +		const fileService = services.fileService;
 +		const quickInputService = services.quickInputService;
-+		const title = localize('academicStudioClaudeNewSkillTitle', "New Claude Skill");
++		const agent = services.agent;
++		const title = localize('academicStudioClaudeNewSkillTitle', "New {0} Skill", agent.displayName);
 +
 +		// Scope first: global (default) or local to the open folder.
-+		let root = joinPath(await claudeHome(services), 'skills');
++		let root = joinPath(await claudeHome(services), agent.skillsDir);
 +		const localDir = localSkillsDir(services);
 +		if (localDir) {
 +			const scope = await quickInputService.pick<ISkillScopeItem>([
-+				{ label: localize('academicStudioClaudeSkillGlobal', "Global"), detail: localize('academicStudioClaudeSkillGlobalDetail', "Claude can use it in every project (~/.claude/skills)."), root },
-+				{ label: localize('academicStudioClaudeSkillLocal', "Local"), detail: localize('academicStudioClaudeSkillLocalDetail', "Claude can use it only in this folder (.claude/skills)."), root: localDir }
++				{ label: localize('academicStudioClaudeSkillGlobal', "Global"), detail: localize('academicStudioClaudeSkillGlobalDetail', "{0} can use it in every project ({1}).", agent.displayName, homeLabel(services, agent.skillsDir)), root },
++				{ label: localize('academicStudioClaudeSkillLocal', "Local"), detail: localize('academicStudioClaudeSkillLocalDetail', "{0} can use it only in this folder ({1}).", agent.displayName, [agent.projectDir, agent.skillsDir].join('/')), root: localDir }
 +			], {
 +				title,
 +				placeHolder: localize('academicStudioClaudeNewSkillScope', "Where should this skill live?")
@@ -446,22 +648,23 @@ new file mode 100644
 +		}
 +
 +		await fileService.createFolder(joinPath(root, name));
++		const who = agent.displayName;
 +		await ensureAndOpen(services, joinPath(root, name, 'SKILL.md'), [
 +			'---',
 +			`name: ${name}`,
-+			'description: One sentence saying what this skill does and when Claude should use it.',
++			`description: One sentence saying what this skill does and when ${who} should use it.`,
 +			'---',
 +			'',
 +			`# ${name}`,
 +			'',
-+			'Write the step-by-step instructions Claude should follow when using this skill.',
++			`Write the step-by-step instructions ${who} should follow when using this skill.`,
 +			'',
 +			'1. First step…',
 +			'2. Second step…',
 +			'',
-+			'Tips: the description above is how Claude decides when to use the skill, so',
-+			'make it specific. After saving, start a new Claude conversation to try it out.',
-+			'You can also ask Claude to improve this skill for you.',
++			`Tips: the description above is how ${who} decides when to use the skill, so`,
++			`make it specific. After saving, start a new ${who} conversation to try it out.`,
++			`You can also ask ${who} to improve this skill for you.`,
 +			''
 +		].join('\n'));
 +	}
@@ -479,7 +682,15 @@ new file mode 100644
 +
 +	override async run(accessor: ServicesAccessor): Promise<void> {
 +		const services = claudeServices(accessor);
-+		await openUrl(services, SKILLS_URL);
++		if (!services) {
++			return;
++		}
++		const url = services.agent.urls.skills;
++		if (!url) {
++			services.notificationService.info(localize('academicStudioAgentNoSkillsUrl', "There is no public skills collection to open for {0}.", services.agent.displayName));
++			return;
++		}
++		await openUrl(services, url);
 +	}
 +}
 +
@@ -487,9 +698,11 @@ new file mode 100644
 +
 +//#region Memory files
 +
-+// Claude Code reads CLAUDE.md (project and ~/.claude). It does NOT read
-+// AGENTS.md directly — the documented pattern is a CLAUDE.md line "@AGENTS.md"
-+// that imports it, which is wired up automatically when creating AGENTS.md.
++// The agent reads its instructions file (CLAUDE.md for Claude) from the project
++// root and from its home folder. Claude does NOT read AGENTS.md directly -- the
++// documented pattern is a CLAUDE.md line "@AGENTS.md" that imports it, wired up
++// automatically when creating AGENTS.md. That needs the agent's importSyntax,
++// and is pointless for an agent whose instructions file already is AGENTS.md.
 +interface IMemoryFileItem extends IQuickPickItem {
 +	kind: 'project' | 'global' | 'agents';
 +}
@@ -506,41 +719,48 @@ new file mode 100644
 +
 +	override async run(accessor: ServicesAccessor): Promise<void> {
 +		const services = claudeServices(accessor);
++		if (!services) {
++			return;
++		}
++		const agent = services.agent;
++		const who = agent.displayName;
++		const file = agent.instructionsFile;
++		const offerAgentsMd = !!agent.importSyntax && file !== 'AGENTS.md';
 +		const folder = firstFolder(services);
 +		const items: IMemoryFileItem[] = [];
 +		if (folder) {
 +			items.push({
-+				label: localize('academicStudioClaudeMemProject', "CLAUDE.md — this folder"),
-+				detail: localize('academicStudioClaudeMemProjectDetail', "Project instructions Claude reads whenever it works in \"{0}\".", folder.name),
++				label: localize('academicStudioClaudeMemProject', "{0} — this folder", file),
++				detail: localize('academicStudioClaudeMemProjectDetail', "Project instructions {0} reads whenever it works in \"{1}\".", who, folder.name),
 +				kind: 'project'
 +			});
 +		}
 +		items.push({
-+			label: localize('academicStudioClaudeMemGlobal', "CLAUDE.md — global"),
-+			detail: localize('academicStudioClaudeMemGlobalDetail', "Personal instructions Claude reads in every project (~/.claude/CLAUDE.md)."),
++			label: localize('academicStudioClaudeMemGlobal', "{0} — global", file),
++			detail: localize('academicStudioClaudeMemGlobalDetail', "Personal instructions {0} reads in every project ({1}).", who, homeLabel(services, file)),
 +			kind: 'global'
 +		});
-+		if (folder) {
++		if (folder && offerAgentsMd) {
 +			items.push({
 +				label: localize('academicStudioClaudeMemAgents', "AGENTS.md — this folder"),
-+				detail: localize('academicStudioClaudeMemAgentsDetail', "Cross-tool instructions. CLAUDE.md gets an \"@AGENTS.md\" line so Claude reads it too."),
++				detail: localize('academicStudioClaudeMemAgentsDetail', "Cross-tool instructions. {0} gets an \"{1}\" line so {2} reads it too.", file, agent.importSyntax!.replace('{0}', 'AGENTS.md'), who),
 +				kind: 'agents'
 +			});
 +		}
 +
 +		const picked = await services.quickInputService.pick(items, {
-+			title: localize('academicStudioClaudeMemTitle', "Claude Memory Files"),
-+			placeHolder: localize('academicStudioClaudeMemPlaceholder', "Instruction files Claude reads at the start of every conversation — pick one to create or edit")
++			title: localize('academicStudioClaudeMemTitle', "{0} Memory Files", who),
++			placeHolder: localize('academicStudioClaudeMemPlaceholder', "Instruction files {0} reads at the start of every conversation — pick one to create or edit", who)
 +		});
 +		if (!picked) {
 +			return;
 +		}
 +
 +		if (picked.kind === 'global') {
-+			await ensureAndOpen(services, joinPath(await claudeHome(services), 'CLAUDE.md'), [
-+				'# My Instructions for Claude (all projects)',
++			await ensureAndOpen(services, joinPath(await claudeHome(services), file), [
++				`# My Instructions for ${who} (all projects)`,
 +				'',
-+				'Claude reads this file at the start of every conversation, in every folder.',
++				`${who} reads this file at the start of every conversation, in every folder.`,
 +				'Write personal preferences here — for example:',
 +				'',
 +				'- Explain what you are doing in plain language.',
@@ -555,10 +775,10 @@ new file mode 100644
 +		}
 +
 +		if (picked.kind === 'project') {
-+			await ensureAndOpen(services, joinPath(folder.uri, 'CLAUDE.md'), [
-+				'# Instructions for Claude (this folder)',
++			await ensureAndOpen(services, joinPath(folder.uri, file), [
++				`# Instructions for ${who} (this folder)`,
 +				'',
-+				'Claude reads this file at the start of every conversation in this folder.',
++				`${who} reads this file at the start of every conversation in this folder.`,
 +				'Write facts and rules about this project — for example:',
 +				'',
 +				'- The data files live in data/ and results go in output/.',
@@ -568,15 +788,16 @@ new file mode 100644
 +			return;
 +		}
 +
-+		// Claude only reads AGENTS.md through a CLAUDE.md import — make sure the
-+		// import exists before opening AGENTS.md itself.
-+		const claudeMd = joinPath(folder.uri, 'CLAUDE.md');
-+		const existing = await readText(services, claudeMd) ?? '';
-+		if (!/^@AGENTS\.md\s*$/m.test(existing)) {
++		// The agent only reads AGENTS.md through an import in its own instructions
++		// file -- make sure the import exists before opening AGENTS.md itself.
++		const importLine = agent.importSyntax!.replace('{0}', 'AGENTS.md');
++		const instructions = joinPath(folder.uri, file);
++		const existing = await readText(services, instructions) ?? '';
++		if (!existing.split('\n').some(line => line.replace(/\s+$/, '') === importLine)) {
 +			try {
-+				await services.fileService.writeFile(claudeMd, VSBuffer.fromString('@AGENTS.md\n' + (existing ? '\n' + existing : '')));
++				await services.fileService.writeFile(instructions, VSBuffer.fromString(importLine + '\n' + (existing ? '\n' + existing : '')));
 +			} catch (e) {
-+				// leave AGENTS.md usable even if CLAUDE.md is unwritable
++				// leave AGENTS.md usable even if the instructions file is unwritable
 +			}
 +		}
 +		await ensureAndOpen(services, joinPath(folder.uri, 'AGENTS.md'), [
@@ -622,7 +843,7 @@ new file mode 100644
 +	const folder = firstFolder(services);
 +	return {
 +		user: joinPath(await claudeHome(services), 'settings.json'),
-+		folder: folder ? joinPath(folder.uri, '.claude', 'settings.local.json') : undefined
++		folder: folder ? joinPath(folder.uri, services.agent.projectDir, 'settings.local.json') : undefined
 +	};
 +}
 +
@@ -773,6 +994,9 @@ new file mode 100644
 +
 +/** Installed plugins, from ~/.claude/plugins/installed_plugins.json. */
 +async function installedPlugins(services: IClaudeServices): Promise<IInstalledPlugin[]> {
++	if (services.agent.features.plugins !== 'claude-marketplace') {
++		return [];
++	}
 +	const home = await claudeHome(services);
 +	const text = await readText(services, joinPath(home, 'plugins', 'installed_plugins.json'));
 +	if (text === undefined) {
@@ -831,6 +1055,12 @@ new file mode 100644
 +
 +	override async run(accessor: ServicesAccessor): Promise<void> {
 +		const services = claudeServices(accessor);
++		if (!services) {
++			return;
++		}
++		if (!hasFeature(services, 'toggles', localize('academicStudioFeatureSkills', "Managing skills from this menu"))) {
++			return;
++		}
 +		// After turning a skill on or off, or deleting one, come back to the
 +		// refreshed list; opening a skill, or Escape on the list, ends it.
 +		while (true) {
@@ -866,7 +1096,7 @@ new file mode 100644
 +			if (localDir && files.folder) {
 +				await addGroup(localize('academicStudioClaudeSkillsLocal', "Local — this folder only"), localDir, files.folder);
 +			}
-+			await addGroup(localize('academicStudioClaudeSkillsGlobal', "Global — every project"), joinPath(await claudeHome(services), 'skills'), files.user);
++			await addGroup(localize('academicStudioClaudeSkillsGlobal', "Global — every project"), joinPath(await claudeHome(services), services.agent.skillsDir), files.user);
 +			for (const plugin of await installedPlugins(services)) {
 +				await addGroup(localize('academicStudioClaudeSkillsPlugin', "From the {0} plugin", plugin.name), joinPath(plugin.root, 'skills'), files.user, plugin);
 +			}
@@ -874,7 +1104,9 @@ new file mode 100644
 +
 +			items.push({ type: 'separator' });
 +			items.push({ label: '$(add) ' + localize('academicStudioClaudeSkillsCreate', "Create Skill…"), command: 'academicStudio.claudeNewSkill' });
-+			items.push({ label: '$(globe) ' + localize('academicStudioClaudeSkillsSearch', "Search Anthropic"), detail: localize('academicStudioClaudeSkillsSearchDetail', "Anthropic's public skills collection"), url: SKILLS_URL });
++			if (services.agent.urls.skills) {
++				items.push({ label: '$(globe) ' + localize('academicStudioClaudeSkillsSearch', "Search Anthropic"), detail: localize('academicStudioClaudeSkillsSearchDetail', "Anthropic's public skills collection"), url: services.agent.urls.skills });
++			}
 +
 +			const picked = await services.quickInputService.pick(items, {
 +				title: localize('academicStudioClaudeSkillsTitle', "Claude Skills"),
@@ -994,7 +1226,17 @@ new file mode 100644
 +
 +	override async run(accessor: ServicesAccessor): Promise<void> {
 +		const services = claudeServices(accessor);
-+		const userConfig = joinPath(await services.pathService.userHome(), '.claude.json');
++		if (!services) {
++			return;
++		}
++		if (!hasFeature(services, 'connectors', localize('academicStudioFeatureConnectors', "Managing connectors from this menu"))) {
++			return;
++		}
++		if (!services.agent.userConfigFile) {
++			services.notificationService.info(localize('academicStudioAgentNoConfigFile', "{0} has no connector configuration file set up in this build.", services.agent.displayName));
++			return;
++		}
++		const userConfig = joinPath(await services.pathService.userHome(), services.agent.userConfigFile);
 +
 +		const describe = (server: any): string => server?.command
 +			? [server.command].concat(server.args ?? []).join(' ')
@@ -1060,7 +1302,10 @@ new file mode 100644
 +				detail: localize('academicStudioClaudeMcpOpenConfigDetail', "~/.claude.json — user-level MCP servers live under \"mcpServers\""),
 +				openConfig: true
 +			});
-+			items.push({ label: '$(book) ' + localize('academicStudioClaudeMcpDocs', "Learn about MCP connectors"), detail: 'code.claude.com/docs/en/mcp', url: MCP_DOCS_URL });
++			const mcpDocs = services.agent.urls.mcpDocs;
++			if (mcpDocs) {
++				items.push({ label: '$(book) ' + localize('academicStudioClaudeMcpDocs', "Learn about MCP connectors"), detail: mcpDocs.replace(/^https:\/\//, ''), url: mcpDocs });
++			}
 +
 +			const picked = await services.quickInputService.pick(items, {
 +				title: localize('academicStudioClaudeConnectorsTitle', "Claude Connectors"),
@@ -1142,18 +1387,33 @@ new file mode 100644
 +
 +	override async run(accessor: ServicesAccessor): Promise<void> {
 +		const services = claudeServices(accessor);
-+		const picked = await services.quickInputService.pick<IPluginItem>([
-+			{
++		if (!services) {
++			return;
++		}
++		if (!hasFeature(services, 'plugins', localize('academicStudioFeaturePlugins', "Browsing plugins from this menu"))) {
++			return;
++		}
++		const urls = services.agent.urls;
++		const choices: IPluginItem[] = [];
++		if (urls.plugins) {
++			choices.push({
 +				label: localize('academicStudioClaudePluginsOfficial', "Anthropic plugins directory"),
 +				detail: localize('academicStudioClaudePluginsOfficialDetail', "claude.com/plugins — browse official plugins"),
-+				url: PLUGINS_URL
-+			},
-+			{
++				url: urls.plugins
++			});
++		}
++		if (urls.communityPlugins) {
++			choices.push({
 +				label: localize('academicStudioClaudePluginsCommunity', "Community plugins"),
 +				detail: localize('academicStudioClaudePluginsCommunityDetail', "github.com/anthropics/claude-plugins-community — plugins contributed by the community"),
-+				url: COMMUNITY_PLUGINS_URL
-+			}
-+		], {
++				url: urls.communityPlugins
++			});
++		}
++		if (!choices.length) {
++			services.notificationService.info(localize('academicStudioAgentNoPluginUrls', "There is no plugin directory to open for {0}.", services.agent.displayName));
++			return;
++		}
++		const picked = await services.quickInputService.pick<IPluginItem>(choices, {
 +			title: localize('academicStudioClaudePluginsTitle', "Claude Plugins"),
 +			placeHolder: localize('academicStudioClaudePluginsPlaceholder', "Plugins bundle skills, connectors, and commands you can install into Claude")
 +		});
