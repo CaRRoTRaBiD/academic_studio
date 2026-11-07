@@ -433,8 +433,44 @@ async function loadPackageCatalog(context) {
 	return { packages: [], live: false };
 }
 
+// ---- coding agent ------------------------------------------------------------
+// Agent-specific folders, file names and CLI names come from the
+// academicStudioAgents registry in product.json (overlay/product.overrides.json),
+// shared with core (patch 55) and academic-studio-defaults. The active agent is
+// the academicStudio.agent setting (falling back to academicStudioDefaultAgent);
+// it is read once at activation, so changing it takes effect after a reload.
+// FALLBACK_AGENT is used only when product.json cannot be read; it mirrors the
+// registry's claude entry, which is what this extension hard-coded before.
+const FALLBACK_AGENT = {
+	id: 'claude', displayName: 'Claude', homeDir: '.claude', skillsDir: 'skills',
+	userConfigFile: '.claude.json', skillsCliAgent: 'claude-code', cli: 'claude',
+	features: { connectors: 'claude-json', plugins: 'claude-marketplace' },
+};
+
+function resolveAgent(context) {
+	let registry = null, fallbackId = 'claude';
+	try {
+		const product = JSON.parse(fs.readFileSync(
+			path.join(context.extensionPath, '..', '..', 'product.json'), 'utf8'));
+		registry = product && product.academicStudioAgents;
+		fallbackId = (product && product.academicStudioDefaultAgent) || fallbackId;
+	} catch (e) { /* no product.json -- use the fallback */ }
+	if (!registry || typeof registry !== 'object') { return FALLBACK_AGENT; }
+	let chosen;
+	try { chosen = vscode.workspace.getConfiguration('academicStudio').get('agent'); } catch (e) { /* none */ }
+	const usable = id => typeof id === 'string' && !id.startsWith('_') && registry[id] && typeof registry[id] === 'object';
+	const id = usable(chosen) ? chosen : usable(fallbackId) ? fallbackId : Object.keys(registry).find(usable);
+	if (!id) { return FALLBACK_AGENT; }
+	return Object.assign({ id, features: {} }, registry[id], { id });
+}
+
+// Set in activate(); every helper below reads it.
+let AGENT = FALLBACK_AGENT;
+
+function agentHome() { return path.join(os.homedir(), AGENT.homeDir); }
+
 // ---- skills (installed via the `skills` CLI over npx) ------------------------
-function claudeSkillsDir() { return path.join(os.homedir(), '.claude', 'skills'); }
+function claudeSkillsDir() { return path.join(agentHome(), AGENT.skillsDir); }
 
 // True if the plugin's skill folder is present (~/.claude/skills/<name>/SKILL.md).
 function skillInstalled(pkg) {
@@ -464,12 +500,17 @@ function skillsAddCmd(pkg, isWin) {
 	const q = isWin ? psq : shq;
 	const npx = isWin ? 'npx.cmd' : 'npx';
 	const sel = pkg.select ? (' --skill ' + q(pkg.select)) : '';
-	return npx + ' --yes ' + SKILLS_CLI + ' add ' + q(pkg.source) + ' -g -y -a claude-code' + sel;
+	// The agent name is registry data: plain names go in bare (as `-a claude-code`
+	// always has), anything else is quoted.
+	const agentFlag = /^[A-Za-z0-9._-]+$/.test(AGENT.skillsCliAgent) ? AGENT.skillsCliAgent : q(AGENT.skillsCliAgent);
+	return npx + ' --yes ' + SKILLS_CLI + ' add ' + q(pkg.source) + ' -g -y -a ' + agentFlag + sel;
 }
 
 // ---- MCP connectors ----------------------------------------------------------
 // Claude Code's user-scope MCP servers live in ~/.claude.json under mcpServers.
-function mcpConfigPath() { return path.join(os.homedir(), '.claude.json'); }
+// Only agents whose connectors feature is 'claude-json' keep them in this format.
+function mcpConfigPath() { return path.join(os.homedir(), AGENT.userConfigFile || '.claude.json'); }
+function agentUsesClaudeJson() { return AGENT.features.connectors === 'claude-json' && !!AGENT.userConfigFile; }
 
 // A package's mcp field is one { name, config } or an array of them.
 function mcpEntries(pkg) {
@@ -489,6 +530,9 @@ function mcpInstalled(pkg) {
 function installMcpServer(pkg) {
 	const entries = mcpEntries(pkg);
 	if (!entries.length) { return { ok: true }; }
+	if (!agentUsesClaudeJson()) {
+		return { ok: false, error: 'adding connectors is not supported for ' + AGENT.displayName + ' yet' };
+	}
 	try {
 		const file = mcpConfigPath();
 		let cfg = {};
@@ -501,7 +545,7 @@ function installMcpServer(pkg) {
 		fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
 		return { ok: true };
 	} catch (e) {
-		return { ok: false, error: 'could not update ~/.claude.json (' + (e && e.message ? e.message : e) + ')' };
+		return { ok: false, error: 'could not update ~/' + AGENT.userConfigFile + ' (' + (e && e.message ? e.message : e) + ')' };
 	}
 }
 
@@ -517,7 +561,8 @@ function installMcpServer(pkg) {
 //   3. install <plugin>@<name>  — fetch the plugin into the cache AND enable it.
 // Download-then-enable, in the right order — no pre-writing enabledPlugins for a
 // plugin whose files aren't fetched yet.
-function settingsJsonPath() { return path.join(os.homedir(), '.claude', 'settings.json'); }
+function settingsJsonPath() { return path.join(agentHome(), 'settings.json'); }
+function agentHasMarketplace() { return AGENT.features.plugins === 'claude-marketplace' && !!AGENT.cli; }
 
 function isMarketplacePlugin(pkg) { return !!(pkg && pkg.marketplace && pkg.marketplaceRepo && pkg.plugin); }
 function pluginKey(pkg) { return pkg.plugin + '@' + pkg.marketplace; }
@@ -535,7 +580,7 @@ function marketplacePluginInstalled(pkg) {
 // unknown. Compared against the catalog's latestVersion to detect updates.
 function installedPluginVersion(pkg) {
 	try {
-		const reg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json'), 'utf8'));
+		const reg = JSON.parse(fs.readFileSync(path.join(agentHome(), 'plugins', 'installed_plugins.json'), 'utf8'));
 		const rec = reg.plugins && reg.plugins[pluginKey(pkg)];
 		const entry = Array.isArray(rec) ? rec[0] : rec;
 		return (entry && typeof entry.version === 'string') ? entry.version : '';
@@ -547,12 +592,13 @@ function installedPluginVersion(pkg) {
 // quote). When the plugin is already installed and only needs a version bump,
 // `claude plugin update` replaces `install`.
 function marketplacePluginCmds(pkg, isUpdate) {
+	const cli = AGENT.cli;
 	const last = isUpdate
-		? 'claude plugin update ' + pluginKey(pkg) + ' --scope user'
-		: 'claude plugin install ' + pluginKey(pkg) + ' --scope user';
+		? cli + ' plugin update ' + pluginKey(pkg) + ' --scope user'
+		: cli + ' plugin install ' + pluginKey(pkg) + ' --scope user';
 	return [
-		'claude plugin marketplace add ' + pkg.marketplaceRepo + ' --scope user',
-		'claude plugin marketplace update ' + pkg.marketplace,
+		cli + ' plugin marketplace add ' + pkg.marketplaceRepo + ' --scope user',
+		cli + ' plugin marketplace update ' + pkg.marketplace,
 		last,
 	];
 }
@@ -567,6 +613,7 @@ const PLAYWRIGHT_MCP = {
 };
 
 function autoInstallPlaywrightMcp() {
+	if (!agentUsesClaudeJson()) { return; }   // other agents' connector formats: later steps
 	if (mcpInstalled(PLAYWRIGHT_MCP)) { return; }
 	installMcpServer(PLAYWRIGHT_MCP);   // best effort; missing entry just re-tries next launch
 }
@@ -864,6 +911,10 @@ async function runInstall(context, selectedIds, detected, packages, reporter) {
 		// update, if it's already present and only a version bump is needed) via the
 		// `claude` CLI, then any pip libs — all in the terminal, in that order.
 		if (item.kind === 'package' && isMarketplacePlugin(item)) {
+			if (!agentHasMarketplace()) {
+				plan.skipped.push({ id, reason: 'plugin marketplaces are not supported for ' + AGENT.displayName + ' yet' });
+				continue;
+			}
 			const isUpdate = !!(detected[id] && detected[id].update);
 			const cmds = marketplacePluginCmds(item, isUpdate);
 			const pip = pipInstallCmd(item, isWin);
@@ -947,6 +998,7 @@ function reportRows(results, skipped, packages) {
 let currentPanel = null;   // singleton: re-running the command reveals, never duplicates
 
 function activate(context) {
+	AGENT = resolveAgent(context);
 	const open = () => openSetupPanel(context);
 	context.subscriptions.push(vscode.commands.registerCommand('academicStudio.openSetup', open));
 	autoInstallClaudeSkills();

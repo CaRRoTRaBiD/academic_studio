@@ -81,6 +81,41 @@
     "streetsidesoftware.code-spell-checker",
     "Anthropic.claude-code"
   ],
+  "academicStudioDefaultAgent": "claude",
+  "academicStudioAgents": {
+    "_note": "Coding agents Academic Studio can drive. One entry per agent; core (patch 55, contrib/academicStudio) and the built-in extensions both read this, so an agent's ids, folders and file names live in exactly one place. 'features' names the implementation each menu item uses for this agent; a missing feature makes that menu item say it is not available for the agent instead of guessing. The active agent is the academicStudio.agent setting, defaulting to academicStudioDefaultAgent.",
+    "claude": {
+      "displayName": "Claude",
+      "extensionId": "anthropic.claude-code",
+      "settingsSection": "claudeCode",
+      "commands": {
+        "open": "claude-vscode.primaryEditor.open",
+        "newChat": "claude-vscode.newConversation"
+      },
+      "tabPattern": "claude",
+      "homeDir": ".claude",
+      "projectDir": ".claude",
+      "instructionsFile": "CLAUDE.md",
+      "importSyntax": "@{0}",
+      "userConfigFile": ".claude.json",
+      "skillsDir": "skills",
+      "skillsCliAgent": "claude-code",
+      "cli": "claude",
+      "urls": {
+        "skills": "https://github.com/anthropics/skills",
+        "mcpDocs": "https://code.claude.com/docs/en/mcp",
+        "plugins": "https://claude.com/plugins",
+        "communityPlugins": "https://github.com/anthropics/claude-plugins-community"
+      },
+      "features": {
+        "conversations": "claude-jsonl",
+        "permissions": "claude-code",
+        "toggles": "claude-settings",
+        "connectors": "claude-json",
+        "plugins": "claude-marketplace"
+      }
+    }
+  },
   "academicStudioVersion": "1.4",
   "configurationDefaults": {
     "workbench.colorTheme": "Visual Studio Light",
